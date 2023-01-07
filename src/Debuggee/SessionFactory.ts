@@ -18,8 +18,7 @@ export class DebuggeeSessionFactory {
     }
 
     waitSession(host: string, port: number, callbackFunction: (session: DebuggeeSession) => void){
-        this.acquireDebuggeeServer(host, port).once('session', (session) => {
-            this.disposeDebuggeeServer();
+        this.acquireDebuggeeServer(host, port).on('session', (session) => {
             callbackFunction(session);
         });
     }

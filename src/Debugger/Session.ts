@@ -1,5 +1,5 @@
 import { Subject } from 'await-notify';
-import { LoggingDebugSession, TerminatedEvent, OutputEvent, InitializedEvent, ExitedEvent } from '@vscode/debugadapter';
+import { LoggingDebugSession, TerminatedEvent, OutputEvent, InitializedEvent, ThreadEvent, ExitedEvent, Thread } from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
 import { DebugLogger } from '../VSCode/LogManager';
 import { DebuggeeSession } from '../Debuggee/Session';
@@ -26,7 +26,9 @@ class PathMap {
 
 export class DebuggerSession extends LoggingDebugSession implements IDebuggerSessionConfig, IDebuggerSessionStdio {
     private debuggeeServer?: DebuggeeSessionFactory;
-    private debuggee?: DebuggeeSession;
+    private debuggee: DebuggeeSession[] = [];
+    private currentThread?: number;
+    private pendingResponseCount: number = 0;
 
     private configurationDone = new Subject();
     private debugProcess?: IDebuggeeProcess;
@@ -38,11 +40,12 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
     public workingDirectory:string = '';
     public debuggeeHost:string = '';
     public debuggeePort:number = Constants.defaultPort;
-    public stopOnEntry:boolean = true;
+    public stopOnEntry:boolean = false;
     public launchExecutable:string = '';
     public launchInterpreter:string = '';
     public launchArguments?:Array<string>;
     public pathMap?: Array<PathMap>;
+    public breakPoints: Map<string, string> = new Map<string, string>();
 
     // Attach configuration
     public terminalMode?: DebuggeeTerminalMode;
@@ -71,6 +74,7 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
         response.body.supportsLogPoints = true;
         response.body.supportSuspendDebuggee = true;
         response.body.supportTerminateDebuggee = true;
+        response.body.supportsSingleThreadExecutionRequests = true;
 
         this.sendResponse(response);
     }
@@ -82,16 +86,16 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
             return;
         }
 
-        this.watingDebuggeeSession(response);
+        this.watingDebuggeeSession();
 
         if(this.launchInterpreter || this.launchExecutable) {
             this.debugProcess = launchScript(this, this);
             this.debugProcess.runTerminal(() => {
-                if (this.debuggee) {
-                    this.debuggee.stop();
-                    this.debuggee = undefined;
-                }
-
+                this.debuggee.forEach(function (debuggee) {
+                    debuggee.stop();
+                });
+                this.debuggee = [];
+                
                 if (this.debuggeeServer) {
                     this.debuggeeServer.dispose();
                     this.debuggeeServer = undefined;
@@ -100,6 +104,9 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
                 this.sendEvent(new TerminatedEvent());
             });
         }
+
+        this.sendResponse(response);
+        this.sendEvent(new InitializedEvent());
     }
 
     protected async launchRequest(response: DebugProtocol.LaunchResponse, args: DebugProtocol.LaunchRequestArguments) {
@@ -111,15 +118,17 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
         }
 
         if (!this.noDebug) {
-            this.watingDebuggeeSession(response);
+            this.watingDebuggeeSession();
+            this.sendResponse(response);
+            this.sendEvent(new InitializedEvent());
         }
 
         this.debugProcess = launchScript(this, this);
         this.debugProcess.run((code?:number) => {
-            if (this.debuggee) {
-                this.debuggee.stop();
-                this.debuggee = undefined;
-            }
+            this.debuggee.forEach(function (debuggee) {
+                debuggee.stop();
+            });
+            this.debuggee = [];
 
             if (this.debuggeeServer) {
                 this.debuggeeServer.dispose();
@@ -179,7 +188,7 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
         this.workingDirectory = args.workingDirectory || '';
         this.sourceBasePath   = args.sourceBasePath   || this.workingDirectory;
         if (args.stopOnEntry === undefined) {
-            this.stopOnEntry = true;
+            this.stopOnEntry = false;
         } else {
             this.stopOnEntry = args.stopOnEntry;
         }
@@ -201,87 +210,145 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
         return true;
     }
 
-    private watingDebuggeeSession(response: DebugProtocol.Response){
+    private watingDebuggeeSession(){
         assert(this.debuggeeServer !== undefined);
         this.debuggeeServer?.waitSession(this.debuggeeHost, this.debuggeePort, (debuggee: DebuggeeSession) => {
             this.processDebuggeeSession(debuggee);
-            this.sendResponse(response);
-            this.sendEvent(new InitializedEvent());
         });
     }
 
     private processDebuggeeSession(debuggee: DebuggeeSession) {
-        this.debuggee = debuggee;
+        this.debuggee.push(debuggee);
+        debuggee.threadId = this.debuggee.length - 1;
 
         debuggee.on('event', (event: DebugProtocol.Event) => {
             this.sendEvent(event);
         });
 
+        debuggee.on('welcome', (response: DebugProtocol.Response) => {
+            if(response.body !== undefined && response.body.threadName !== undefined) {
+                debuggee.threadName = response.body.threadName;
+            }
+        });
+
         debuggee.on('response', (response: DebugProtocol.Response) => {
-            this.sendResponse(response);
+            --this.pendingResponseCount;
+            if (this.pendingResponseCount <= 0) {
+                this.sendResponse(response);
+            }
+            else {
+                this.logRequest(response);
+            }
         });
 
         debuggee.on('close', (message) => {
-            this.sendEvent(new TerminatedEvent());
+            this.sendEvent(new ThreadEvent('exited', debuggee.threadId));
+            debuggee.threadId = -1;
         });
 
         debuggee.processSession(this);
+
+        this.sendEvent(new ThreadEvent('started', debuggee.threadId));
     }
 
-    private proxy(response: DebugProtocol.Response, args?: any): void {
+    private proxyThread(threadId: number, response: DebugProtocol.Response, args?: any)
+    {
         this.logRequest(response);
-        if (this.debuggee) {
-            this.debuggee.proxy(response, args);
+        let debuggee = this.debuggee.at(threadId);
+        if(debuggee) {
+            this.pendingResponseCount = 1;
+            debuggee.proxy(response, args);
         }
     }
 
+    private proxyAll(response: DebugProtocol.Response, args?: any): void {
+        this.logRequest(response);
+
+        let owner = this;
+        owner.pendingResponseCount = 0;
+        this.debuggee.forEach(function (debuggee) {
+            if (debuggee.threadId !== -1) {
+                owner.pendingResponseCount++;
+                debuggee.proxy(response, args);
+            }
+        });
+    }
+
     protected nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): void {
-        this.proxy(response, args);
+        this.proxyAll(response, args);
     }
 
     protected continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
-        this.proxy(response, args);
+        if (args !== undefined && args.threadId !== undefined) {
+            this.currentThread = args.threadId;
+            this.proxyThread(this.currentThread, response, args);
+        }
+        //this.proxyAll(response, args);
     }
 
     protected stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments): void {
-        this.proxy(response, args);
+        this.proxyAll(response, args);
     }
 
     protected stepOutRequest(response: DebugProtocol.StepOutResponse, args: DebugProtocol.StepOutArguments): void {
-        this.proxy(response, args);
+        this.proxyAll(response, args);
     }
 
     protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
-        this.proxy(response, args);
+        if (args !== undefined && args.threadId !== undefined) {
+            this.currentThread = args.threadId;
+            this.proxyThread(this.currentThread, response, args);
+        }
     }
 
     protected scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): void {
-        this.proxy(response, args);
+        if (this.currentThread !== undefined) {
+            this.proxyThread(this.currentThread, response, args);
+        }
     }
 
     protected variablesRequest(response: DebugProtocol.VariablesResponse, args: DebugProtocol.VariablesArguments): void {
-        this.proxy(response, args);
+        if (this.currentThread !== undefined) {
+            this.proxyThread(this.currentThread, response, args);
+        }
     }
 
     protected threadsRequest(response: DebugProtocol.ThreadsResponse): void {
-        this.proxy(response);
+        response.body = { threads: [] };
+        this.debuggee.forEach(function (debuggee) {
+            if (debuggee.threadId !== -1) {
+                response.body.threads.push(new Thread(debuggee.threadId, debuggee.threadName));
+            }
+        });
+        this.sendResponse(response);
     }
 
     protected setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): void {
-        this.proxy(response, args);
+        assert(args.source.path !== undefined);
+        
+        if (args === undefined || args.breakpoints === undefined || args.breakpoints.length === 0) {
+            this.breakPoints[args.source.path!] = undefined;
+        }
+        else {
+            this.breakPoints[args.source.path!] = JSON.stringify(args);
+        }
+
+        this.proxyAll(response, args);
     }
 
     protected configurationDoneRequest(response: DebugProtocol.ConfigurationDoneResponse, args: DebugProtocol.ConfigurationDoneArguments): void {
         this.configurationDone.notify();
-        this.proxy(response, args);
+        this.sendResponse(response);
     }
 
     protected evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments): void {
-        this.proxy(response, args);
+        if (this.currentThread !== undefined) {
+            this.proxyThread(this.currentThread, response, args);
+        }
     }
 
     protected pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): void {
-        this.proxy(response, args);
+        this.proxyAll(response, args);
     }
 
     protected disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments, request?: DebugProtocol.Request): void {
@@ -300,37 +367,40 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
                 this.debugProcess = undefined;
             }
 
-            if (this.debuggee) {
-                this.debuggee.stop();
-                this.debuggee = undefined;
-            }
+            this.debuggee.forEach(function (debuggee) {
+                debuggee.stop();
+            });
+            this.debuggee = [];
 
             this.sendResponse(response);
-        } else if (this.debuggee) {
+        } else if (this.debuggee.length !== 0) {
             let timer = setTimeout(() => {
                 if (this.debugProcess) {
                     this.debugProcess.dispose(false);
                     this.debugProcess = undefined;
                 }
-                if (this.debuggee) {
-                    this.debuggee.stop();
-                    this.debuggee = undefined;
-                }
+                this.debuggee.forEach(function (debuggee) {
+                    debuggee.stop();
+                });
+                this.debuggee = [];
                 this.sendResponse(response);
             }, 15000);
 
-            this.debuggee.disconnect(response, args, (response, self) => {
-                clearTimeout(timer);
-                if (self.debugProcess) {
-                    self.debugProcess.dispose(false);
-                    self.debugProcess = undefined;
-                }
-                if (self.debuggee) {
-                    self.debuggee.stop();
-                    self.debuggee = undefined;
-                }
-                this.sendResponse(response);
-            }, this);
+            let owner = this;
+            this.debuggee.forEach(function (debuggee) {
+                debuggee.disconnect(response, args, (response, self) => {
+                    clearTimeout(timer);
+                    if (self.debugProcess) {
+                        self.debugProcess.dispose(false);
+                        self.debugProcess = undefined;
+                    }
+                    if (self.debuggee) {
+                        self.debuggee.stop();
+                        self.debuggee = undefined;
+                    }
+                    owner.sendResponse(response);
+                }, owner);
+            });
         } else if (this.debugProcess) {
             this.debugProcess.dispose(false);
             this.debugProcess = undefined;
@@ -363,8 +433,9 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
     }
 
     private debugAdapterLog(message: string){
-        let status = this.debuggee ? '+' : '-';
+        let status = (this.debuggee.length !== 0) ? '+' : '-';
         DebugLogger.logAdapterInfo("[DebuggerSession][" + status + "] " + message);
+        console.log(message);
     }
 
     private logRequest(response: DebugProtocol.Response){

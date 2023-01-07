@@ -1570,6 +1570,13 @@ function vscode_debugger.send_message(msg)
   end
 end
 
+function vscode_debugger.send_wellcome(req, body)
+  vscode_debugger.send_message {
+    type        = "welcome",
+    body        = body
+  }
+end
+
 function vscode_debugger.send_success(req, body)
   vscode_debugger.send_message {
     type        = "response",
@@ -1618,6 +1625,19 @@ function vscode_debugger.send_stop_event(reason)
   })
 end
 
+function vscode_debugger.add_breakpoints(args)
+  local file = vscode_debugger.path_from_ide(args.source.path)
+  remove_file_breakpoint(file)
+  local result = {}
+  for i, breakpoint in ipairs(args.breakpoints) do
+    set_breakpoint(file, breakpoint.line)
+    result[i] = {
+      verified = true,
+      line     = breakpoint.line,
+    }
+  end
+end
+
 function vscode_debugger.loop(sev, svars, sfile, sline)
   local command, args
   local eval_env = svars or {}
@@ -1651,30 +1671,34 @@ function vscode_debugger.loop(sev, svars, sfile, sline)
       vscode_stop_on_entry = args.stopOnEntry
       vscode_pathmap = args.pathMap
       vscode_init_failure = false
-      -- No response
-    elseif command == 'configurationDone' then
-      if vscode_init_failure then
-        vscode_debugger.send_failure(req, 'Initialization failure')
-      else
-        vscode_debugger.send_success(req, {})
-        if vscode_stop_on_entry then
-          vscode_debugger.send_stop_event('entry')
-        else -- continue command
-          state.step_into = false
-          state.step_over = false
+    
+      if args.breakPoints ~= nil then
+		    for i, args in pairs(args.breakPoints) do
+			    vscode_debugger.add_breakpoints(json.decode(args));
+		    end
+	    end
 
-          local ev, vars, file, line, idx_watch = coroyield()
-          eval_env = vars
-          if ev == events.BREAK then
-            vscode_debugger.send_stop_event('breakpoint')
-          elseif ev == events.WATCH then -- TODO: conditional breakpoint
-            vscode_debugger.send_stop_event('breakpoint')
-          elseif ev == events.RESTART then
-            -- nothing to do
-          else
-            vscode_debugger.send_stop_event('exception')
-            vscode_debugger.send_stderr(file)
-          end
+      if THREAD_NAME then
+        vscode_debugger.send_wellcome(req, {threadName = THREAD_NAME})
+      end
+
+      if vscode_stop_on_entry then
+        vscode_debugger.send_stop_event('entry')
+      else -- continue command
+        state.step_into = false
+        state.step_over = false
+
+        local ev, vars, file, line, idx_watch = coroyield()
+        eval_env = vars
+        if ev == events.BREAK then
+          vscode_debugger.send_stop_event('breakpoint')
+        elseif ev == events.WATCH then -- TODO: conditional breakpoint
+          vscode_debugger.send_stop_event('breakpoint')
+        elseif ev == events.RESTART then
+          -- nothing to do
+        else
+          vscode_debugger.send_stop_event('exception')
+          vscode_debugger.send_stderr(file)
         end
       end
     elseif command == 'threads' then
@@ -1686,16 +1710,7 @@ function vscode_debugger.loop(sev, svars, sfile, sline)
       }
       vscode_debugger.send_success(req, {threads = result})
     elseif command == 'setBreakpoints' then
-      local file = vscode_debugger.path_from_ide(args.source.path)
-      remove_file_breakpoint(file)
-      local result = {}
-      for i, breakpoint in ipairs(args.breakpoints) do
-        set_breakpoint(file, breakpoint.line)
-        result[i] = {
-          verified = true,
-          line     = breakpoint.line,
-        }
-      end
+      vscode_debugger.add_breakpoints(args);
       vscode_debugger.send_success(req, {breakpoints = result})
     elseif command == 'stackTrace' then
       vscode_variables_ref = {}

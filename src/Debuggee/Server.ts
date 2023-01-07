@@ -24,7 +24,7 @@ export class DebuggeeServer extends EventEmitter{
             this.processConnection(socket);
         });
 
-        server.listen(this.listenPort, this.listenIP, 0, function () {
+        server.listen(this.listenPort, this.listenIP, 10, function () {
             let address = <Net.AddressInfo>server.address();
             let listeningAddress: string;
             if (address.family === 'IPv6') {

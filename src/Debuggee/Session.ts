@@ -24,6 +24,8 @@ export class DebuggeeSession extends EventEmitter {
     private connection: DebuggeeConnection;
     private debuggerSession?: DebuggerSession;
     private callbackMap = new Map<number, Object>();
+    public threadId: number = -1;
+    public threadName: string = "default";
 
     constructor(socket: Net.Socket){
         super();
@@ -73,6 +75,7 @@ export class DebuggeeSession extends EventEmitter {
                 stopOnEntry:        this.debuggerSession?.stopOnEntry,
                 sourceBasePath:     this.debuggerSession?.sourceBasePath,
                 directorySeperator: path.sep,
+                breakPoints:        this.debuggerSession?.breakPoints,
             }
         };
         this.send(command);
@@ -98,6 +101,15 @@ export class DebuggeeSession extends EventEmitter {
 
     public processMessage(message: string){
         let response = JSON.parse(message);
+        if (response.body !== undefined && response.body.threadId !== undefined) {
+            response.body.threadId = this.threadId;
+        }
+        if (response.body !== undefined && response.body.allThreadsStopped !== undefined) {
+            response.body.allThreadsStopped = false;
+        }
+        if (response.body !== undefined && response.body.allThreadsContinued !== undefined) {
+            response.body.allThreadsContinued = false;
+        }
         this.invokeCallback(response);
         this.emit(response.type, response);
     }
