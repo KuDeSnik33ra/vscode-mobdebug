@@ -102,7 +102,7 @@ local mac = not win and (os and os.getenv and os.getenv('DYLD_LIBRARY_PATH') or 
 local iscasepreserving = win or (mac and io.open('/library') ~= nil)
 
 local coroutines = {}; setmetatable(coroutines, {__mode = "k"}) -- "weak" keys
-local events = { BREAK = 1, WATCH = 2, RESTART = 3, STACK = 4 }
+local events = { BREAK = 1, WATCH = 2, RESTART = 3, STACK = 4, CAPTURE = 5 }
 local PROTOCOLS = {MOBDEBUG = 1, VSCODE = 2}
 local deferror = "execution aborted at default debugee"
 
@@ -954,14 +954,14 @@ local function debug_hook(event, line)
 
     local possible_pending_io = debugger.loop_pending_io()
 
-    local vars, status, res
+    local vars, status, res, args
     if (state.watchescnt > 0) then
       vars = capture_vars(1)
       for index, value in pairs(state.watches) do
         setfenv(value, vars)
         local ok, fired = pcall(value)
         if ok and fired then
-          status, res = cororesume(coro_debugger, events.WATCH, vars, file, line, index)
+          status, res, args = cororesume(coro_debugger, events.WATCH, vars, file, line, index)
           break -- any one watch is enough; don't check multiple times
         end
       end
@@ -982,14 +982,21 @@ local function debug_hook(event, line)
       vars = vars or capture_vars(1)
       state.step_into = false
       state.step_over = false
-      status, res = cororesume(coro_debugger, events.BREAK, vars, file, line)
+      status, res, args = cororesume(coro_debugger, events.BREAK, vars, file, line)
     end
 
-    -- handle 'stack' command that provides stack() information to the debugger
-    while status and res == 'stack' do
-      -- resume with the stack trace and variables
-      if vars then restore_vars(vars) end -- restore vars so they are reflected in stack values
-      status, res = cororesume(coro_debugger, events.STACK, stack(3), file, line)
+    while status do
+      if res == 'stack' then
+        -- handle 'stack' command that provides stack() information to the debugger
+        if vars then restore_vars(vars) end -- restore vars so they are reflected in stack values
+        -- resume with the stack trace and variables
+        status, res, args = cororesume(coro_debugger, events.STACK, stack(3), file, line)
+      elseif res == 'capture' and args.frame ~= nil then
+        local env = capture_vars(args.frame)
+        status, res, args = cororesume(coro_debugger, events.CAPTURE, env, file, line)
+      else
+        break;
+      end
     end
 
     -- need to recheck once more as resume after 'stack' command may
@@ -1842,7 +1849,19 @@ function vscode_debugger.loop(sev, svars, sfile, sline)
           if stack == 0 then stack = nil end
           -- if the requested stack frame is not the current one, then use a new capture
           -- with a specific stack frame: `capture_vars(0, coro_debugee)`
-          local env = stack and coro_debugee and capture_vars(stack - 1, coro_debugee) or eval_env
+
+          local env = eval_env
+          if stack then
+            if coro_debugee then
+              env = capture_vars(stack - 1, coro_debugee)
+            else
+              local ev, frame = coroyield("capture", {frame = stack + 1})
+              if ev == events.CAPTURE then
+                env = frame
+              end
+            end
+          end
+
           setfenv(func, env)
           status, res = pcall_vararg_pack(pcall(func, unpack(rawget(env, '...') or {})))
         end
