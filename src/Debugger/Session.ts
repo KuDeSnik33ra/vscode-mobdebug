@@ -149,7 +149,7 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
 
     private configureAttach(response: DebugProtocol.Response, args: AttachRequestArguments):boolean{
         if (args.executable) {
-            this.launchExecutable = args.executable;
+            this.launchExecutable = args.noDebug ? (args.executableNoDebug ? args.executableNoDebug : args.executable) : args.executable;
             this.launchInterpreter = '';
         } else if(args.interpreter) {
             this.launchInterpreter = args.interpreter;
@@ -475,7 +475,9 @@ interface LaunchRequestArguments extends RequestArguments {
 }
 
 interface AttachRequestArguments extends RequestArguments {
+    noDebug?: boolean;
     executable?: string;
+    executableNoDebug?: string;
     interpreter?: string;
     arguments?: Array<string>;
     runMode?: string;
