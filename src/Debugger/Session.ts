@@ -327,7 +327,7 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
         assert(args.source.path !== undefined);
         
         if (args === undefined || args.breakpoints === undefined || args.breakpoints.length === 0) {
-            this.breakPoints[args.source.path!] = undefined;
+            this.breakPoints.delete(args.source.path!);
         }
         else {
             this.breakPoints[args.source.path!] = JSON.stringify(args);
