@@ -327,10 +327,10 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
         assert(args.source.path !== undefined);
         
         if (args === undefined || args.breakpoints === undefined || args.breakpoints.length === 0) {
-            this.breakPoints.delete(args.source.path!);
+            delete this.breakPoints[args.source.path!.toLowerCase()];
         }
         else {
-            this.breakPoints[args.source.path!] = JSON.stringify(args);
+            this.breakPoints[args.source.path!.toLowerCase()] = JSON.stringify(args);
         }
 
         this.proxyAll(response, args);
