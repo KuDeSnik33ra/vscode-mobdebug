@@ -30,7 +30,7 @@
             ],
             "outFiles": [
                 "${workspaceRoot}/out/**/*.js",
-                "${workspaceRoot}/out/common/*.js"
+                "${workspaceRoot}/dist/*.js"
             ]
         }
     ]
