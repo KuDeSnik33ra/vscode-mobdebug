@@ -253,7 +253,7 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
 
     private proxyThread(threadId: number, response: DebugProtocol.Response, args?: any)
     {
-        this.logRequest(response);
+        this.logRequestThread(threadId, response);
         let debuggee = this.debuggee.at(threadId);
         if(debuggee) {
             this.pendingResponseCount = 1;
@@ -275,7 +275,13 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
     }
 
     protected nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): void {
-        this.proxyAll(response, args);
+        if (args !== undefined && args.threadId !== undefined) {
+            this.currentThread = args.threadId;
+            this.proxyThread(this.currentThread, response, args);
+        }
+        else {
+            this.proxyAll(response, args);
+        }
     }
 
     protected continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
@@ -287,11 +293,23 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
     }
 
     protected stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments): void {
-        this.proxyAll(response, args);
+        if (args !== undefined && args.threadId !== undefined) {
+            this.currentThread = args.threadId;
+            this.proxyThread(this.currentThread, response, args);
+        }
+        else {
+            this.proxyAll(response, args);
+        }
     }
 
     protected stepOutRequest(response: DebugProtocol.StepOutResponse, args: DebugProtocol.StepOutArguments): void {
-        this.proxyAll(response, args);
+        if (args !== undefined && args.threadId !== undefined) {
+            this.currentThread = args.threadId;
+            this.proxyThread(this.currentThread, response, args);
+        }
+        else {
+            this.proxyAll(response, args);
+        }
     }
 
     protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
@@ -440,6 +458,11 @@ export class DebuggerSession extends LoggingDebugSession implements IDebuggerSes
 
     private logRequest(response: DebugProtocol.Response){
         let msg = `Request: ${response.command}[${response.request_seq}]`;
+        this.debugAdapterLog(msg);
+    }
+
+    private logRequestThread(threadId: number, response: DebugProtocol.Response){
+        let msg = `Request to ${threadId}: ${response.command}[${response.request_seq}]`;
         this.debugAdapterLog(msg);
     }
 
